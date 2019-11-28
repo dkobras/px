@@ -22,7 +22,7 @@ setup(
     url = "https://github.com/genotrance/px",
     author = "Ganesh Viswanathan",
     author_email = "dev@genotrance.com",
-    platforms = "Windows",
+    platforms = ["Linux", "Windows"],
     classifiers = [
         "Development Status :: 4 - Beta",
         "Environment :: Win32 (MS Windows)",
@@ -30,6 +30,7 @@ setup(
         "Intended Audience :: End Users/Desktop",
         "License :: OSI Approved :: MIT License",
         "Natural Language :: English",
+        "Operating System :: POSIX :: Linux",
         "Operating System :: Microsoft :: Windows",
         "Programming Language :: Python :: 2.7",
         "Programming Language :: Python :: 3.4",
@@ -46,9 +47,14 @@ setup(
         "netaddr",
         "ntlm-auth",
         "psutil",
-        "pywin32",
-        "winkerberos"
+        'pywin32;platform_system=="Windows"',
+        'winkerberos;platform_system=="Windows"',
+        'gssapi;platform_system=="Linux"',
+        'pypac;platform_system=="Linux"'
     ],
+    extras_require = {
+        'GUI': [ "Gooey" ]
+    },
     data_files = [
         ("lib/site-packages/px-proxy", [
             "HISTORY.txt",
