@@ -1,0 +1,137 @@
+---
+
+version: "3.5"
+
+services:
+  kdc-example:
+    image: kdc-example
+    build:
+      context: $PWD
+      dockerfile: $PWD/kdc.dockerfile
+      target: kdc-example
+    volumes:
+      - kdb-data:/var/lib/krb5kdc
+    ports:
+      - 88
+    networks:
+      - examplecom
+  kadmin-example:
+    image: kadmin-example
+    build:
+      context: $PWD
+      dockerfile: $PWD/kdc.dockerfile
+      target: kadmin-example
+    volumes:
+      - kdb-data:/var/lib/krb5kdc
+    depends_on:
+      - kdc-example
+    ports:
+      - 464
+      - 749
+    networks:
+      - examplecom
+  samba-dc:
+    image: samba-dc
+    build:
+      context: $PWD
+      dockerfile: $PWD/samba-dc.dockerfile
+      target: samba-dc
+    ports:
+      - 53
+      - 88
+      - 135
+      - 139
+      - 389
+      - 445
+      - 464
+      - 636
+      - 3268
+      - 3269
+    cap_add:
+      - SYS_ADMIN
+    networks:
+      - examplecom
+  squid-noauth:
+    image: squid-noauth
+    build:
+      context: $PWD
+      dockerfile: $PWD/squid.dockerfile
+      target: squid-noauth
+    ports:
+      - 3128
+    networks:
+      - examplecom
+  squid-spnego:
+    image: squid-spnego
+    hostname: squid-spnego
+    depends_on:
+      - kadmin-example
+    build:
+      context: $PWD
+      dockerfile: $PWD/squid.dockerfile
+      target: squid-spnego
+    ports:
+      - 3128
+    networks:
+      - examplecom
+  squid-ntlm:
+    image: squid-ntlm
+    hostname: squid-ntlm
+    depends_on:
+      - samba-dc
+    build:
+      context: $PWD
+      dockerfile: $PWD/squid.dockerfile
+      target: squid-ntlm
+    ports:
+      - 3128
+    networks:
+      - examplecom
+  px:
+    image: px-test
+    depends_on:
+      - kdc-example
+      - squid-noauth
+      - squid-spnego
+    build:
+      context: $PWD/..
+      dockerfile: $PWD/px.dockerfile
+    ports:
+      - 3128:3128
+    networks:
+      - examplecom
+  testserver-http:
+    image: testserver-http
+    hostname: testserver-http
+    build:
+      context: $PWD
+      dockerfile: $PWD/testserver.dockerfile
+    ports:
+      - 8080:80
+    networks:
+      - examplecom
+  testserver-https:
+    image: testserver-https
+    hostname: testserver-https
+    build:
+      context: $PWD
+      dockerfile: $PWD/https-proxy.dockerfile
+    depends_on:
+      - testserver-http
+    networks:
+      - examplecom
+    ports:
+      - 80:8080
+      - 443:8443
+  ntlmserver-http:
+    image: testserver-http
+    hostname: ntlmserver-http
+    networks:
+      - examplecom
+
+networks:
+  examplecom:
+    name: example.com
+
+volumes:
+  kdb-data:
