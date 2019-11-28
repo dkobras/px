@@ -56,6 +56,9 @@ setup(
             "README.md",
             "px.ico",
             "px.ini"
+        ]),
+        ("share/applications", [
+            "px.desktop"
         ])
     ],
     entry_points = {

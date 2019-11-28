@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Encoding=UTF-8
+Type=Application
+Categories=Network;
+
+Name=Px
+Comment=Authenticating web proxy
+Exec=px
+
+Icon=/usr/lib/site-packages/px-proxy/px.ico

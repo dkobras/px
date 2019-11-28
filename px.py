@@ -20,6 +20,28 @@ import threading
 import time
 import traceback
 
+try:
+    from gooey import Gooey, GooeyParser
+except ImportError:
+    def Gooey(f, *args, **kwargs):
+        return f
+    class GooeyArgumentGroup(argparse._ArgumentGroup):
+        def add_argument(self, *args, **kwargs):
+            _ = kwargs.pop('widget', None)
+            _ = kwargs.pop('metavar', None)
+            _ = kwargs.pop('gooey_options', None)
+            super(GooeyArgumentGroup, self).add_argument(*args, **kwargs)
+    class GooeyParser(argparse.ArgumentParser):
+        def add_argument(self, *args, **kwargs):
+            _ = kwargs.pop('widget', None)
+            _ = kwargs.pop('gooey_options', None)
+            return super(GooeyParser, self).add_argument(*args, **kwargs)
+        def add_argument_group(self, *args, **kwargs):
+            _ = kwargs.pop('gooey_options', {})
+            group = GooeyArgumentGroup(self, *args, **kwargs)
+            self._action_groups.append(group)
+            return group
+
 # Print if possible
 def pprint(*objs):
     try:
@@ -1781,30 +1803,77 @@ def save():
 
     sys.exit()
 
-def parse_config():
-    if "--debug" in sys.argv:
-        State.logger = Log(dfile(), "w")
+# Automagic GUI support via Gooey wraps a single function that contains all
+# argument parsing. However, in order to pre-seed the GUI with proper defaults
+# from the conffile, we need to parse the command-line (at least the part
+# dealing with the location of the conffile) before the GUI wrapper is
+# invoked. In order to address this problem with minimal code duplication,
+# we split up command-line parsing into two functions: In parse_initial(),
+# we deal with conffile handling, and all the other arguments that we don't
+# want or need to expose in the GUI. From here, we call into parse_config()
+# that handles the rest of the arguments, and dynamically apply the GUI
+# wrapper to it as required.
+def parse_initial():
+    parser = argparse.ArgumentParser(prog=__progname__, description='An HTTP proxy server to automatically authenticate through an NTLM proxy', add_help=False)
 
-    if getattr(sys, "frozen", False) != False or "pythonw.exe" in sys.executable:
-        attach_console()
+    parser.add_argument('--config', default='', help='Specify config file. Valid file path, default: px.ini in working directory (user homedir on Linux)')
 
-    if "-h" in sys.argv or "--help" in sys.argv:
-        pprint(HELP)
-        sys.exit()
+    actions = parser.add_argument_group('actions')
+
+    actions.add_argument('--save', action='store_true', default=False, help='Save configuration to px.ini or file specified with --config')
+    actions.add_argument('--set-password', metavar="USER", help='Query NTLM password for USER and store in keyring')
+
+    if platform.system() == 'Windows':
+        actions.add_argument('--install', action='store_true', default=False, help='Add Px to the Windows registry to run on startup')
+        actions.add_argument('--uninstall', action='store_true', default=False, help='Remove Px from the Windows registry')
+    elif platform.system() == 'Linux':
+        actions.add_argument('--install', action='store_true', default=False, help='Add Px to systemd user startup')
+        actions.add_argument('--uninstall', action='store_true', default=False, help='Remove Px systemd user startup')
+    else:
+        pass
+
+    actions.add_argument('--quit', action='store_true', default=False, help='Quit a running instance of Px.exe')
+
+    args, remaining_args = parser.parse_known_args()
+
+    if getattr(args, 'install', False):
+        install()
+    elif getattr(args, 'uninstall', False):
+        uninstall()
+    elif getattr(args, 'set_password', ''):
+        set_password(args.set_password)
+    elif args.quit:
+        quit()
 
     # Load configuration file
     State.config = configparser.ConfigParser()
-    State.ini = os.path.join(os.path.dirname(get_script_path()), State.ini)
-    for i in range(len(sys.argv)):
-        if "=" in sys.argv[i]:
-            val = sys.argv[i].split("=")[1]
-            if "--config=" in sys.argv[i]:
-                State.ini = val
-                if not os.path.exists(val) and "--save" not in sys.argv:
-                    pprint("Could not find config file: " + val)
-                    sys.exit()
-    if os.path.exists(State.ini):
-        State.config.read(State.ini)
+
+    if args.config:
+        State.ini = args.config
+    elif platform.system() == 'Windows':
+        State.ini = os.path.join(os.path.dirname(get_script_path()), State.ini)
+    else:
+        State.ini = os.path.join(os.path.expanduser('~'), State.ini)
+
+
+    # Special-case Gooey's internal option --ignore-gooey: It means we've
+    # been called from the GUI, which gives us a /complete/ set of
+    # command-line options as desired by the user. In this case, we don't
+    # want to pre-seed defaults from the conffile, but use only what's
+    # given on the command-line.
+    # For most options, this distinction isn't necessary because the
+    # command-line overrides options in the conffile, anyway. However, we
+    # do have a couple of boolean options (eg. --hostonly) that can only
+    # be activated on the command-line, but there's no way to deactivate
+    # a boolean option that is activated in the conffile. This may be ok
+    # for CLI use, but it breaks the UX in the GUI case. We can fix the
+    # behaviour by skipping the conffile entirely, which makes all boolean
+    # options default to False.
+    if '--ignore-gooey' not in remaining_args:
+        ini_read = State.config.read(State.ini)
+        if not args.save and args.config and args.config not in ini_read:
+            pprint("Unable to parse config file: " + State.ini)
+            sys.exit()
 
     # [proxy] section
     if "proxy" not in State.config.sections():
@@ -1826,56 +1895,110 @@ def parse_config():
     if "settings" not in State.config.sections():
         State.config.add_section("settings")
 
-    cfg_int_init("settings", "workers", "2")
+    cfg_int_init("settings", "workers", "4")
     cfg_int_init("settings", "threads", "5")
     cfg_int_init("settings", "idle", "30")
     cfg_float_init("settings", "socktimeout", "20.0")
     cfg_int_init("settings", "proxyreload", "60")
     cfg_int_init("settings", "foreground", "0")
+    cfg_int_init("settings", "log", "0")
+
+    # Only fire up GUI if we've been called without
+    # arguments (except --config), and if we stand
+    # a chance to actually use a working display.
+    if len(remaining_args) == 0 and \
+       os.getenv('DISPLAY', '') != '':
+        # XXX We'd like to set show_stop_warning=False here, but it seems to
+        #     be broken in current Gooey. (Pressing the Stop button doesn't
+        #     have any effect at all.)
+        return Gooey(parse_config,
+                     default_size=(1000, 800),
+                     progress_regex=r'^Serving at \w*:(?P<port>\d+) proc MainProcess$',
+                     progress_expr="port and 100")(None)
+
+    # Remove Gooey-internal option. This is usually handled by the wrapper, but
+    # due to our conditional wrapping, we need to handle it manually.
+    try:
+        sys.argv.remove('--ignore-gooey')
+    except ValueError:
+        pass
+
+    # We've suppressed the default help option above (because it would only
+    # show the 'initial' arguments). In order to retain '--help' for the
+    # non-GUI case, we need to re-add it manually.
+    parser.add_argument('-h', '--help', action='help', help='Show this help message and exit')
+    parse_config(parser)
+
+def parse_config(parser=None):
+    # parse_initial() calls us with a None arg if we're Gooey-wrapped and need
+    # to build an ArgumentParser from scratch for GUI use.
+    # In the CLI case (parser != None), we can simply add further arguments to
+    # the existing parser. This allows us to obtain the full --help output
+    # without duplicating arguments here.
+    gui = not bool(parser)
+    if gui:
+        parser = GooeyParser(prog=__progname__, description='An HTTP proxy server to automatically authenticate through an NTLM proxy')
+
+        # Arguments that need to be available both in parse_initial() and in
+        # the GUI. For there, we just go with a bit of duplication.
+        parser.add_argument('--config', default=State.ini, widget='FileChooser', gooey_options={'full_width': True}, help='Specify config file. Valid file path, default: px.ini in working directory (user homedir on Linux)')
+        parser.add_argument('--save', action='store_true', default=False, help='Save configuration to config file and exit')
+
+    # command-line arguments corresponding to section [proxy] in px.ini
+    options = parser.add_argument_group('proxy options')
+    options.add_argument('--proxy', '--server', default=State.config.get('proxy', 'server'), help='NTLM server(s) to connect through. (IP:port, hostname:port)')
+    options.add_argument('--pac', default=State.config.get('proxy', 'pac'), help='PAC file to use to connect')
+    options.add_argument('--listen', default=State.config.get('proxy', 'listen'), help='IP interface to listen on')
+    options.add_argument('--port', default=int(State.config.get('proxy', 'port')), type=int, help='Port to run this proxy. Valid port number')
+    options.add_argument('--gateway', action='store_true', default=bool(int(State.config.get('proxy', 'gateway'))), help='Allow remote machines to use proxy')
+    options.add_argument('--hostonly', action='store_true', default=bool(int(State.config.get('proxy', 'hostonly'))), help='Allow only local interfaces to use proxy')
+    options.add_argument('--username', default=State.config.get('proxy', 'username'), help='Authentication to use when SSPI/GSSAPI is unavailable (matching password is retrieved from keyring)')
+    options.add_argument('--allow', default=State.config.get('proxy', 'allow'), help='Allow connection from specific subnets (comma-separated list)')
+    options.add_argument('--noproxy', default=State.config.get('proxy', 'noproxy'), help='Direct connect to specific subnets like a regular proxy (comma-separated list)')
+    options.add_argument('--useragent', default=State.config.get('proxy', 'useragent'), help='Override or send User-Agent header on client\'s behalf')
+    options.add_argument('--auth', choices=['NTLM', 'BASIC', 'KERBEROS', 'AUTO'], default=State.config.get('proxy', 'auth'), help='Upstream proxy type')
+
+    # command-line arguments corresponding to section [settings] in px.ini
+    settings = parser.add_argument_group('settings')
+    settings.add_argument('--workers', default=int(State.config.get('settings', 'workers')), type=int, help='Number of parallel workers (processes)')
+    settings.add_argument('--threads', default=int(State.config.get('settings', 'threads')), type=int, help='Number of parallel threads per worker (process)')
+    settings.add_argument('--idle', default=int(State.config.get('settings', 'idle')), type=int, help='Idle timeout in seconds for HTTP connect sessions')
+    settings.add_argument('--socktimeout', default=float(State.config.get('settings', 'socktimeout')), type=float, help='Timeout in seconds for connections before giving up')
+    settings.add_argument('--proxyreload', default=int(State.config.get('settings', 'proxyreload')), type=int, help='Time interval in seconds before refreshing proxy info')
+    settings.add_argument('--foreground', action='store_true', default=bool(int(State.config.get('settings', 'foreground'))), help='Run in foreground when frozen or with pythonw.exe')
+    settings.add_argument('--debug', '--log', action='store_true', default=bool(int(State.config.get('settings', 'log'))), help='Enable debug logging')
+    settings.add_argument('--uniqlog', action='store_true', default=False, help='Generate unique log file names')
+
+    args = parser.parse_args()
+
+    if args.debug:
+        State.logger = Log(dfile(), "w")
+
+    if getattr(sys, "frozen", False) != False or "pythonw.exe" in sys.executable:
+        attach_console()
 
     cfg_int_init("settings", "log", "0" if State.logger is None else "1")
     if State.config.get("settings", "log") == "1" and State.logger is None:
         State.logger = Log(dfile(), "w")
 
-    # Command line flags
-    for i in range(len(sys.argv)):
-        if "=" in sys.argv[i]:
-            val = sys.argv[i].split("=")[1]
-            if "--proxy=" in sys.argv[i] or "--server=" in sys.argv[i]:
-                cfg_str_init("proxy", "server", val, None, True)
-            elif "--pac=" in sys.argv[i]:
-                cfg_str_init("proxy", "pac", val, set_pac, True)
-            elif "--listen=" in sys.argv[i]:
-                cfg_str_init("proxy", "listen", val, None, True)
-            elif "--port=" in sys.argv[i]:
-                cfg_int_init("proxy", "port", val, True)
-            elif "--allow=" in sys.argv[i]:
-                cfg_str_init("proxy", "allow", val, parse_allow, True)
-            elif "--noproxy=" in sys.argv[i]:
-                cfg_str_init("proxy", "noproxy", val, parse_noproxy, True)
-            elif "--useragent=" in sys.argv[i]:
-                cfg_str_init("proxy", "useragent", val, set_useragent, True)
-            elif "--username=" in sys.argv[i]:
-                cfg_str_init("proxy", "username", val, set_username, True)
-            elif "--auth=" in sys.argv[i]:
-                cfg_str_init("proxy", "auth", val, set_auth, True)
-            else:
-                for j in ["workers", "threads", "idle", "proxyreload"]:
-                    if "--" + j + "=" in sys.argv[i]:
-                        cfg_int_init("settings", j, val, True)
+    cfg_str_init("proxy", "server", args.proxy, None, True)
+    cfg_str_init("proxy", "pac", args.pac, set_pac, True)
+    cfg_str_init("proxy", "listen", args.listen, None, True)
+    cfg_int_init("proxy", "port", args.port, True)
+    cfg_str_init("proxy", "allow", args.allow, parse_allow, True)
+    cfg_str_init("proxy", "noproxy", args.noproxy, parse_noproxy, True)
+    cfg_str_init("proxy", "useragent", args.useragent, set_useragent, True)
+    cfg_str_init("proxy", "username", args.username, set_username, True)
+    cfg_str_init("proxy", "auth", args.auth, set_auth, True)
 
-                for j in ["socktimeout"]:
-                    if "--" + j + "=" in sys.argv[i]:
-                        cfg_float_init("settings", j, val, True)
-
-    if "--gateway" in sys.argv:
-        cfg_int_init("proxy", "gateway", "1", True)
-
-    if "--hostonly" in sys.argv:
-        cfg_int_init("proxy", "hostonly", "1", True)
-
-    if "--foreground" in sys.argv:
-        cfg_int_init("settings", "foreground", "1", True)
+    cfg_int_init("settings", "workers", args.workers, True)
+    cfg_int_init("settings", "threads", args.threads, True)
+    cfg_int_init("settings", "idle", args.idle, True)
+    cfg_int_init("settings", "proxyreload", args.proxyreload, True)
+    cfg_int_init("settings", "socktimeout", args.socktimeout, True)
+    cfg_int_init("proxy", "gateway", int(args.gateway), True)
+    cfg_int_init("proxy", "hostonly", int(args.hostonly), True)
+    cfg_int_init("settings", "foreground", int(args.foreground), True)
 
     ###
     # Dependency propagation
@@ -1902,13 +2025,7 @@ def parse_config():
 
     State.proxy_server = parse_proxy(State.config.get("proxy", "server"))
 
-    if "--install" in sys.argv:
-        install()
-    elif "--uninstall" in sys.argv:
-        uninstall()
-    elif "--quit" in sys.argv:
-        quit()
-    elif "--save" in sys.argv:
+    if args.save:
         save()
 
     if State.proxy_server:
@@ -2134,7 +2251,7 @@ def main():
     multiprocessing.freeze_support()
     sys.excepthook = handle_exceptions
 
-    parse_config()
+    parse_initial()
 
     run_pool()
 
