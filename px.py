@@ -3,12 +3,15 @@
 from __future__ import print_function
 
 __version__ = "0.4.0"
+__progname__ = "px"
+__servicename__ = __progname__
 
+import argparse
 import base64
 import ctypes
-import ctypes.wintypes
 import multiprocessing
 import os
+import platform
 import select
 import signal
 import socket
@@ -31,6 +34,15 @@ except ImportError:
     pprint("Requires module futures")
     sys.exit()
 
+# Need to catch ValueError on non-Windows as well
+# due to https://bugs.python.org/issue16396
+try:
+    import ctypes.wintypes
+except (ImportError, ValueError):
+    if platform.system() == 'Windows':
+        pprint("Requires module ctypes.wintypes on Windows")
+        sys.exit()
+
 try:
     import netaddr
 except ImportError:
@@ -47,53 +59,106 @@ try:
     import pywintypes
     import sspi
 except ImportError:
-    pprint("Requires module pywin32")
-    sys.exit()
+    if platform.system() == 'Windows':
+        pprint("No SSPI support due to missing modules")
+        sys.exit()
 
 try:
     import winkerberos
 except ImportError:
-    pprint("Requires module winkerberos")
-    sys.exit()
+    if platform.system() == 'Windows':
+        pprint("No support for Kerberos on Windows found")
+        sys.exit()
 
 try:
-    import ntlm_auth.ntlm
+    import gssapi
 except ImportError:
-    pprint("Requires module ntlm-auth")
-    sys.exit()
+    pprint("No support for GSSAPI found")
+
+try:
+    from ntlm_auth.ntlm import NtlmContext
+except ImportError:
+    try:
+        from ntlm_auth.ntlm import Ntlm
+    except ImportError:
+        pprint("Requires module ntlm-auth")
+        sys.exit()
+    # compat wrapper for ntlm_auth < 1.2.0
+    # just implements the bare minimum of what we actually use here
+    class NtlmContext(object):
+        def __init__(self, username, password, domain=None, workstation=None,
+                     cbt_data=None, ntlm_compatibility=3):
+            self.username = username
+            self.password = password
+            self.domain = domain
+            self.workstation = workstation
+            _ = cbt_data
+            self._context = Ntlm(ntlm_compatibility)
+        def step(self, input_token=None):
+            if not input_token:
+                msg = \
+                    self._context.create_negotiate_message(self.domain,
+                                                           self.workstation)
+            else:
+                self._context.parse_challenge_message(base64.b64encode(input_token))
+                msg = \
+                    self._context.create_authenticate_message(self.username,
+                                                              self.password,
+                                                              self.domain,
+                                                              self.workstation)
+            return base64.b64decode(msg)
 
 try:
     import keyring
-    import keyring.backends.Windows
-
-    keyring.set_keyring(keyring.backends.Windows.WinVaultKeyring())
+    if platform.system() == 'Windows':
+        import keyring.backends.Windows
+        keyring.set_keyring(keyring.backends.Windows.WinVaultKeyring())
 except ImportError:
     pprint("Requires module keyring")
     sys.exit()
 
+try:
+    import pypac
+except ImportError:
+    if platform.system() != 'Windows':
+        pprint('Requires module pypac unless running on Windows')
+        sys.exit()
+
 # Python 2.x vs 3.x support
 try:
     import configparser
-    import http.server as httpserver
-    import socketserver
-    import urllib.parse as urlparse
-    import winreg
 except ImportError:
     import ConfigParser as configparser
+try:
+    import http.server as httpserver
+except ImportError:
     import SimpleHTTPServer as httpserver
+try:
+    import socketserver
+except ImportError:
     import SocketServer as socketserver
+try:
+    import urllib.parse as urlparse
+except ImportError:
     import urlparse
-    import _winreg as winreg
-
-    os.getppid = psutil.Process().ppid
-    PermissionError = WindowsError
+try:
+    import winreg
+except ImportError:
+    try:
+        import _winreg as winreg
+        os.getppid = psutil.Process().ppid
+        PermissionError = WindowsError
+    except ImportError:
+        if platform.system() == 'Windows':
+            pprint('Requires module winreg on Windows')
+            sys.exit()
 
 HELP = """Px v%s
 
 An HTTP proxy server to automatically authenticate through an NTLM proxy
 
 Usage:
-  px [FLAGS]
+  %s [FLAGS]
   python px.py [FLAGS]
 
 Actions:
@@ -183,7 +248,9 @@ Configuration:
     upstream proxy type.
 
   --workers=  settings:workers=
-  Number of parallel workers (processes). Valid integer, default: 2
+  Number of parallel workers (processes). Valid integer, default: 4
+  Only available on Windows with Python v3.3 or later. Otherwise, the number of
+  threads is multiplied by this setting
 
   --threads=  settings:threads=
   Number of parallel threads per worker (process). Valid integer, default: 5
@@ -206,22 +273,26 @@ Configuration:
 
   --debug  settings:log=
   Enable debug logging. default: 0
-    Logs are written to working directory and over-written on startup
-    A log is automatically created if Px crashes for some reason
+    Logs are written to working directory (Windows) or home directory (other
+    platforms) and over-written on startup. A log is automatically created
+    if Px crashes for some reason
 
   --uniqlog
   Generate unique log file names
     Prevents logs from being overwritten on subsequent runs. Also useful if
-    running multiple instances of Px""" % __version__
+    running multiple instances of Px""" % (__version__, __progname__)
 
 # Windows version
 #  6.1 = Windows 7
 #  6.2 = Windows 8
 #  6.3 = Windows 8.1
 # 10.0 = Windows 10
-WIN_VERSION = float(
-    str(sys.getwindowsversion().major) + "." +
-    str(sys.getwindowsversion().minor))
+try:
+    WIN_VERSION = float(
+        str(sys.getwindowsversion().major) + "." +
+        str(sys.getwindowsversion().minor))
+except AttributeError:
+    pass
 
 # Proxy modes - source of proxy info
 MODE_NONE = 0
@@ -315,8 +386,11 @@ def dfile():
         name = "quit"
     if "--uniqlog" in sys.argv:
         name = "%s-%f" % (name, time.time())
-    logfile = os.path.join(os.path.dirname(get_script_path()),
-        "debug-%s.log" % name)
+    if platform.system() == 'Windows':
+        logdir = os.path.dirname(get_script_path())
+    else:
+        logdir = os.path.expanduser('~')
+    logfile = os.path.join(logdir, "debug-%s.log" % name)
     return logfile
 
 def reopen_stdout():
@@ -364,12 +438,15 @@ class AuthMessageGenerator:
 
         if proxy_type == "NTLM":
             if not pwd:
-                self.ctx = sspi.ClientAuth("NTLM",
-                  os.environ.get("USERNAME"), scflags=0)
-                self.get_response = self.get_response_sspi
+                try:
+                    self.ctx = sspi.ClientAuth("NTLM",
+                      os.environ.get("USERNAME"), scflags=0)
+                    self.get_response = self.get_response_sspi
+                except NameError:
+                    raise NameError('NTLM auth unavailable without SSPI and password')
             else:
-                self.ctx = ntlm_auth.ntlm.NtlmContext(
-                    State.username, pwd, State.domain, "", ntlm_compatibility=3)
+                self.ctx = NtlmContext(State.username, pwd, State.domain,
+                                       "", ntlm_compatibility=3)
                 self.get_response = self.get_response_ntlm
         elif proxy_type == "BASIC":
             if not State.username:
@@ -407,10 +484,21 @@ class AuthMessageGenerator:
                     principal = (urlparse.quote(State.username) + ":" +
                         urlparse.quote(pwd))
 
-            _, self.ctx = winkerberos.authGSSClientInit("HTTP@" +
-                proxy_server_address, principal=principal, gssflags=0,
-                mech_oid=winkerberos.GSS_MECH_OID_SPNEGO)
-            self.get_response = self.get_response_wkb
+            try:
+                _, self.ctx = winkerberos.authGSSClientInit("HTTP@" +
+                    proxy_server_address, principal=principal, gssflags=0,
+                    mech_oid=winkerberos.GSS_MECH_OID_SPNEGO)
+                self.get_response = self.get_response_wkb
+            except NameError:
+                try:
+                    service = gssapi.Name('HTTP@' + proxy_server_address, gssapi.NameType.hostbased_service)
+                    # alternative to suppress canonisation of server address:
+                    #service = gssapi.Name('HTTP/' + proxy_server_address, gssapi.NameType.kerberos_principal)
+                    dprint('* GSSAPI service ' + str(service))
+                    self.ctx = gssapi.SecurityContext(name=service, usage='initiate')
+                    self.get_response = self.get_response_gssapi
+                except NameError:
+                    raise NameError('NEGOTIATE/KERBEROS auth unavailable without either winkerberos or gssapi')
 
     def get_response_sspi(self, challenge=None):
         dprint("pywin32 SSPI")
@@ -426,6 +514,29 @@ class AuthMessageGenerator:
         response_msg = b64encode(output_buffer[0].Buffer)
         response_msg = response_msg.decode("utf-8").replace('\012', '')
         return response_msg
+
+    def get_response_gssapi(self, challenge=None):
+        dprint("GSSAPI")
+        if challenge:
+            dprint("* GSSAPI challenge: " + challenge)
+            challenge = base64.b64decode(challenge.encode('ascii'))
+        try:
+            token = self.ctx.step(token=challenge)
+        except gssapi.exceptions.GeneralError as exc:
+            # GeneralError should not happen during normal usage
+            traceback.print_exc(file=sys.stdout)
+            return None
+        except gssapi.raw.misc.GSSError as exc:
+            msgs = list()
+            # Omit "Unspecified GSS failure"
+            if exc.maj_code != 851968:
+                msgs += exc.get_all_statuses(exc.maj_code, True)
+            msgs += exc.get_all_statuses(exc.min_code, False)
+            _ = [dprint("GSSAPI authentication failed: " + str(x)) for x in msgs]
+            return None
+        b64token = base64.b64encode(token).decode('ascii')
+
+        return b64token
 
     def get_response_wkb(self, challenge=""):
         dprint("winkerberos SSPI")
@@ -724,7 +835,12 @@ class Proxy(httpserver.SimpleHTTPRequestHandler):
                     return resp
 
                 # Generate auth message
-                ntlm = AuthMessageGenerator(proxy_type, self.proxy_address[0])
+                try:
+                    ntlm = AuthMessageGenerator(proxy_type, self.proxy_address[0])
+                except NameError as exc:
+                    dprint(str(exc))
+                    return resp
+
                 ntlm_resp = ntlm.get_response()
                 if ntlm_resp is None:
                     dprint("Bad auth response")
@@ -1203,6 +1319,15 @@ def start_worker(pipeout):
     serve_forever(httpd)
 
 def run_pool():
+    workers = State.config.getint("settings", "workers")
+
+    if not hasattr(socket, "fromshare"):
+        threads = State.config.getint("settings", "threads")
+        State.config.set("settings", "threads", str(workers*threads))
+        dprint("Platform lacks required features for multi-process support")
+        dprint("Adjusted thread pool from %d to %d instead" %
+               (threads, State.config.getint("settings", "threads")))
+
     try:
         httpd = ThreadedTCPServer((State.config.get("proxy", "listen").strip(),
                                    State.config.getint("proxy", "port")), Proxy)
@@ -1218,7 +1343,6 @@ def run_pool():
     print_banner()
 
     if hasattr(socket, "fromshare"):
-        workers = State.config.getint("settings", "workers")
         for i in range(workers-1):
             (pipeout, pipein) = multiprocessing.Pipe()
             p = multiprocessing.Process(target=start_worker, args=(pipeout,))
@@ -1233,32 +1357,36 @@ def run_pool():
 ###
 # Proxy detection
 
-class WINHTTP_CURRENT_USER_IE_PROXY_CONFIG(ctypes.Structure):
-    _fields_ = [("fAutoDetect", ctypes.wintypes.BOOL),
-                # "Automatically detect settings"
-                ("lpszAutoConfigUrl", ctypes.wintypes.LPWSTR),
-                # "Use automatic configuration script, Address"
-                ("lpszProxy", ctypes.wintypes.LPWSTR),
-                # "1.2.3.4:5" if "Use the same proxy server for all protocols",
-                # else advanced
-                # "ftp=1.2.3.4:5;http=1.2.3.4:5;https=1.2.3.4:5;socks=1.2.3.4:5"
-                ("lpszProxyBypass", ctypes.wintypes.LPWSTR),
-                # ";"-separated list
-                # "Bypass proxy server for local addresses" adds "<local>"
-               ]
+try:
+    class WINHTTP_CURRENT_USER_IE_PROXY_CONFIG(ctypes.Structure):
+        _fields_ = [("fAutoDetect", ctypes.wintypes.BOOL),
+                    # "Automatically detect settings"
+                    ("lpszAutoConfigUrl", ctypes.wintypes.LPWSTR),
+                    # "Use automatic configuration script, Address"
+                    ("lpszProxy", ctypes.wintypes.LPWSTR),
+                    # "1.2.3.4:5" if "Use the same proxy server for all protocols",
+                    # else advanced
+                    # "ftp=1.2.3.4:5;http=1.2.3.4:5;https=1.2.3.4:5;socks=1.2.3.4:5"
+                    ("lpszProxyBypass", ctypes.wintypes.LPWSTR),
+                    # ";"-separated list
+                    # "Bypass proxy server for local addresses" adds "<local>"
+                   ]
 
-class WINHTTP_AUTOPROXY_OPTIONS(ctypes.Structure):
-    _fields_ = [("dwFlags", ctypes.wintypes.DWORD),
-                ("dwAutoDetectFlags", ctypes.wintypes.DWORD),
-                ("lpszAutoConfigUrl", ctypes.wintypes.LPCWSTR),
-                ("lpvReserved", ctypes.c_void_p),
-                ("dwReserved", ctypes.wintypes.DWORD),
-                ("fAutoLogonIfChallenged", ctypes.wintypes.BOOL), ]
+    class WINHTTP_AUTOPROXY_OPTIONS(ctypes.Structure):
+        _fields_ = [("dwFlags", ctypes.wintypes.DWORD),
+                    ("dwAutoDetectFlags", ctypes.wintypes.DWORD),
+                    ("lpszAutoConfigUrl", ctypes.wintypes.LPCWSTR),
+                    ("lpvReserved", ctypes.c_void_p),
+                    ("dwReserved", ctypes.wintypes.DWORD),
+                    ("fAutoLogonIfChallenged", ctypes.wintypes.BOOL), ]
 
-class WINHTTP_PROXY_INFO(ctypes.Structure):
-    _fields_ = [("dwAccessType", ctypes.wintypes.DWORD),
-                ("lpszProxy", ctypes.wintypes.LPCWSTR),
-                ("lpszProxyBypass", ctypes.wintypes.LPCWSTR), ]
+    class WINHTTP_PROXY_INFO(ctypes.Structure):
+        _fields_ = [("dwAccessType", ctypes.wintypes.DWORD),
+                    ("lpszProxy", ctypes.wintypes.LPCWSTR),
+                    ("lpszProxyBypass", ctypes.wintypes.LPCWSTR), ]
+except AttributeError as exc:
+    if platform.system() == 'Windows':
+        raise exc
 
 # Parameters for WinHttpOpen, http://msdn.microsoft.com/en-us/library/aa384098(VS.85).aspx
 WINHTTP_NO_PROXY_NAME = 0
@@ -1343,9 +1471,42 @@ def winhttp_find_proxy_for_url(
     dprint("WinHttpGetProxyForUrl accesstype %s" % (proxy_info.dwAccessType,))
     return ""
 
+def pypac_find_proxy_for_url(url, autodetect=False, pac_url=None):
+    dprint("Detecting proxy for URL " + str(url))
+    dprint("Using PAC URL " + str(pac_url) + ", autodetection " + str(autodetect))
+    try:
+        with open(pac_url) as f:
+            pacfile = pypac.parser.PACFile(f.read())
+    except (OSError, TypeError):
+        pacfile = pypac.get_pac(url=pac_url, from_dns=autodetect)
+
+    if not pacfile:
+        dprint("No PAC file, trying DIRECT instead")
+        return "DIRECT"
+
+    parts = urlparse.urlparse(url)
+    host = urlparse.unquote(parts.netloc).split(':', 1)[0]
+    proxy_info = pacfile.find_proxy_for_url(str(url), host)
+
+    proxies = pypac.parser.parse_pac_value(proxy_info)
+
+    supported_proxies = []
+    for x in proxies:
+        if x.startswith('http://'):
+            supported_proxies.append(x[7:])
+        elif x == 'DIRECT':
+            supported_proxies.append(x)
+        else:
+            dprint("Removing unsupported proxy: " + x)
+
+    dprint("Found proxies: " + ','.join(supported_proxies))
+    return ','.join(supported_proxies)
+
 def file_url_to_local_path(file_url):
     parts = urlparse.urlparse(file_url)
     path = urlparse.unquote(parts.path)
+    if platform.system() != 'Windows':
+        return path
     if path.startswith('/') and not path.startswith('//'):
         if len(parts.netloc) == 2 and parts.netloc[1] == ':':
             return parts.netloc + path
@@ -1376,51 +1537,56 @@ def load_proxy(quiet=False):
         proxy_mode = MODE_NONE
         proxy_servers = []
 
-        # Get proxy info from Internet Options
-        ie_proxy_config = WINHTTP_CURRENT_USER_IE_PROXY_CONFIG()
-        ok = ctypes.windll.winhttp.WinHttpGetIEProxyConfigForCurrentUser(
-            ctypes.byref(ie_proxy_config))
-        if not ok:
-            if not quiet:
-                dprint(ctypes.GetLastError())
-        else:
-            if ie_proxy_config.fAutoDetect:
-                proxy_mode = MODE_AUTO
-            elif ie_proxy_config.lpszAutoConfigUrl:
-                State.pac = ie_proxy_config.lpszAutoConfigUrl
-                proxy_mode = MODE_PAC
+        try:
+            # Get proxy info from Internet Options
+            ie_proxy_config = WINHTTP_CURRENT_USER_IE_PROXY_CONFIG()
+            ok = ctypes.windll.winhttp.WinHttpGetIEProxyConfigForCurrentUser(
+                ctypes.byref(ie_proxy_config))
+            if not ok:
                 if not quiet:
-                    dprint("AutoConfigURL = " + State.pac)
+                    dprint(ctypes.GetLastError())
             else:
-                # Manual proxy
-                proxies = []
-                proxies_str = ie_proxy_config.lpszProxy or ""
-                for proxy_str in proxies_str.lower().replace(
-                        ' ', ';').split(';'):
-                    if '=' in proxy_str:
-                        scheme, proxy = proxy_str.split('=', 1)
-                        if scheme.strip() != "ftp":
-                            proxies.append(proxy)
-                    elif proxy_str:
-                        proxies.append(proxy_str)
-                if proxies:
-                    proxy_servers = parse_proxy(",".join(proxies))
-                    proxy_mode = MODE_MANUAL
+                if ie_proxy_config.fAutoDetect:
+                    proxy_mode = MODE_AUTO
+                elif ie_proxy_config.lpszAutoConfigUrl:
+                    State.pac = ie_proxy_config.lpszAutoConfigUrl
+                    proxy_mode = MODE_PAC
+                    if not quiet:
+                        dprint("AutoConfigURL = " + State.pac)
+                else:
+                    # Manual proxy
+                    proxies = []
+                    proxies_str = ie_proxy_config.lpszProxy or ""
+                    for proxy_str in proxies_str.lower().replace(
+                            ' ', ';').split(';'):
+                        if '=' in proxy_str:
+                            scheme, proxy = proxy_str.split('=', 1)
+                            if scheme.strip() != "ftp":
+                                proxies.append(proxy)
+                        elif proxy_str:
+                            proxies.append(proxy_str)
+                    if proxies:
+                        proxy_servers = parse_proxy(",".join(proxies))
+                        proxy_mode = MODE_MANUAL
 
-                # Proxy exceptions into noproxy
-                bypass_str = ie_proxy_config.lpszProxyBypass or "" # FIXME: Handle "<local>"
-                bypasses = [h.strip() for h in bypass_str.lower().replace(
-                    ' ', ';').split(';')]
-                for bypass in bypasses:
-                    try:
-                        ipns = netaddr.IPGlob(bypass)
-                        State.noproxy.add(ipns)
-                        if not quiet:
-                            dprint("Noproxy += " + bypass)
-                    except:
-                        State.noproxy_hosts.append(bypass)
-                        if not quiet:
-                            dprint("Noproxy hostname += " + bypass)
+                    # Proxy exceptions into noproxy
+                    bypass_str = ie_proxy_config.lpszProxyBypass or "" # FIXME: Handle "<local>"
+                    bypasses = [h.strip() for h in bypass_str.lower().replace(
+                        ' ', ';').split(';')]
+                    for bypass in bypasses:
+                        try:
+                            ipns = netaddr.IPGlob(bypass)
+                            State.noproxy.add(ipns)
+                            if not quiet:
+                                dprint("Noproxy += " + bypass)
+                        except:
+                            State.noproxy_hosts.append(bypass)
+                            if not quiet:
+                                dprint("Noproxy hostname += " + bypass)
+        except (AttributeError, NameError):
+            # Non-Windows
+            proxy_mode = MODE_AUTO
+            proxy_servers = []
 
         State.proxy_refresh = time.time()
         if not quiet:
@@ -1439,16 +1605,22 @@ def load_proxy(quiet=False):
 def find_proxy_for_url(url):
     proxy_str = ""
     if State.proxy_mode == MODE_AUTO:
-        proxy_str = winhttp_find_proxy_for_url(url, autodetect=True)
+        if platform.system() == 'Windows':
+            proxy_str = winhttp_find_proxy_for_url(url, autodetect=True)
+        else:
+            proxy_str = pypac_find_proxy_for_url(url, autodetect=True)
 
     elif State.proxy_mode in [MODE_PAC, MODE_CONFIG_PAC]:
         pac = State.pac
-        if "file://" in State.pac or not State.pac.startswith("http"):
-            host = State.config.get("proxy", "listen") or "localhost"
-            port = State.config.getint("proxy", "port")
-            pac = "http://%s:%d/PxPACFile.pac" % (host, port)
-            dprint("PAC URL is local: " + pac)
-        proxy_str = winhttp_find_proxy_for_url(url, pac_url=pac)
+        if platform.system() != 'Windows':
+            proxy_str = pypac_find_proxy_for_url(url, pac_url=pac)
+        else:
+            if "file://" in State.pac or not State.pac.startswith("http"):
+                host = State.config.get("proxy", "listen") or "localhost"
+                port = State.config.getint("proxy", "port")
+                pac = "http://%s:%d/PxPACFile.pac" % (host, port)
+                dprint("PAC URL is local: " + pac)
+            proxy_str = winhttp_find_proxy_for_url(url, pac_url=pac)
 
     # Handle edge case if the result is a list that starts with DIRECT. Assume
     # everything should be direct as the string DIRECT is tested explicitly in
@@ -1551,10 +1723,10 @@ def set_pac(pac):
         sys.exit()
 
 def set_auth(auth):
-    if auth.upper() not in ["NTLM", "KERBEROS", "BASIC", ""]:
+    if auth.upper() not in ["NTLM", "KERBEROS", "BASIC", "AUTO", ""]:
         pprint("Bad proxy auth type: %s" % auth)
         sys.exit()
-    if auth != "":
+    if auth not in ('', 'AUTO'):
         State.auth = auth
 
 def cfg_int_init(section, name, default, override=False):
@@ -1744,7 +1916,7 @@ def parse_config():
     elif State.pac:
         State.proxy_mode = MODE_CONFIG_PAC
     else:
-        load_proxy(quiet=True)
+        load_proxy(quiet=False)
 
     if State.proxy_mode == MODE_NONE and not State.config.get(
             "proxy", "noproxy"):
@@ -1828,6 +2000,9 @@ def get_script_cmd():
     return spath
 
 def check_installed():
+    if platform.system() != 'Windows':
+        return False
+
     ret = True
     runkey = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
         r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
@@ -1840,6 +2015,11 @@ def check_installed():
     return ret
 
 def install():
+    if platform.system() == 'Linux':
+        sys.exit(os.system('/bin/systemctl --user enable ' + __servicename__))
+    elif platform.system() != 'Windows':
+        sys.exit('Install not supported on ' + platform.system())
+
     if check_installed() is False:
         runkey = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Run", 0,
@@ -1854,6 +2034,11 @@ def install():
     sys.exit()
 
 def uninstall():
+    if platform.system() == 'Linux':
+        sys.exit(os.system('/bin/systemctl --user disable ' + __servicename__))
+    elif platform.system() != 'Windows':
+        sys.exit('Uninstall not supported on ' + platform.system())
+
     if check_installed() is True:
         runkey = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Run", 0,
@@ -1866,10 +2051,28 @@ def uninstall():
 
     sys.exit()
 
+def set_password(username):
+    if sys.stdin.isatty():
+        import getpass
+        password = getpass.getpass('Password: ')
+    else:
+        password = sys.stdin.readline().rstrip()
+
+    if password:
+        keyring.set_password('Px', username, password)
+        pprint('Password stored in default keyring service Px and user ' + username)
+    else:
+        pprint('Empty password, skipping...')
+
+    sys.exit()
+
 ###
 # Attach/detach console
 
 def attach_console():
+    if platform.system() != 'Windows':
+        return
+
     if ctypes.windll.kernel32.GetConsoleWindow() != 0:
         dprint("Already attached to a console")
         return
@@ -1910,6 +2113,9 @@ def attach_console():
     reopen_stdout()
 
 def detach_console():
+    if platform.system() != 'Windows':
+        return
+
     if ctypes.windll.kernel32.GetConsoleWindow() == 0:
         return
 

@@ -1,0 +1,11 @@
+[Unit]
+Description=Px authenticating proxy
+StartLimitIntervalSec=60s
+StartLimitBurst=1
+
+[Service]
+ExecStart=/usr/bin/px --hostonly
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
