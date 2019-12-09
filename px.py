@@ -5,6 +5,7 @@ from __future__ import print_function
 __version__ = "0.4.0"
 __progname__ = "px"
 __servicename__ = __progname__
+__inidefault__ = __progname__ + ".ini"
 
 import argparse
 import base64
@@ -175,17 +176,17 @@ except ImportError:
             pprint('Requires module winreg on Windows')
             sys.exit()
 
-HELP = """Px v%s
+HELP = """Px v%(version)s
 
 An HTTP proxy server to automatically authenticate through an NTLM proxy
 
 Usage:
-  %s [FLAGS]
+  %(progname)s [FLAGS]
   python px.py [FLAGS]
 
 Actions:
   --save
-  Save configuration to px.ini or file specified with --config
+  Save configuration to %(ini)s or file specified with --config
     Allows setting up Px config directly from command line
     Values specified on CLI override any values in existing config file
     Values not specified on CLI or config file are set to defaults
@@ -201,8 +202,8 @@ Actions:
 
 Configuration:
   --config=
-  Specify config file. Valid file path, default: px.ini in working directory
-
+  Specify config file. Valid file path, default: %(ini)s in working directory
+    (Windows) or in ~/.config/%(progname)s/ (non-Windows)
   --proxy=  --server=  proxy:server= in INI file
   NTLM server(s) to connect through. IP:port, hostname:port
     Multiple proxies can be specified comma separated. Px will iterate through
@@ -302,7 +303,7 @@ Configuration:
   --uniqlog
   Generate unique log file names
     Prevents logs from being overwritten on subsequent runs. Also useful if
-    running multiple instances of Px""" % (__version__, __progname__)
+    running multiple instances of Px""" % {'version': __version__, 'progname': __progname__, 'ini': __inidefault__}
 
 # Windows version
 #  6.1 = Windows 7
@@ -343,7 +344,7 @@ class State(object):
     username = ""
     auth = None
 
-    ini = "px.ini"
+    ini = __inidefault__
     max_disconnect = 3
     max_line = 65536 + 1
 
@@ -1795,6 +1796,9 @@ def cfg_str_init(section, name, default, proc=None, override=False):
         proc(val)
 
 def save():
+    cfgdir = os.path.dirname(State.ini)
+    if cfgdir:
+        os.makedirs(cfgdir, mode=0o700, exist_ok=True)
     with open(State.ini, "w") as cfgfile:
         State.config.write(cfgfile)
     pprint("Saved config to " + State.ini + "\n")
@@ -1816,11 +1820,11 @@ def save():
 def parse_initial():
     parser = argparse.ArgumentParser(prog=__progname__, description='An HTTP proxy server to automatically authenticate through an NTLM proxy', add_help=False)
 
-    parser.add_argument('--config', default='', help='Specify config file. Valid file path, default: px.ini in working directory (user homedir on Linux)')
+    parser.add_argument('--config', default='', help='Specify config file. Valid file path, default: %s in working directory (Windows) or in ~/.config/%s/ (non-Windows)' % (__inidefault__, __progname__))
 
     actions = parser.add_argument_group('actions')
 
-    actions.add_argument('--save', action='store_true', default=False, help='Save configuration to px.ini or file specified with --config')
+    actions.add_argument('--save', action='store_true', default=False, help='Save configuration to %s or file specified with --config' % __inidefault__)
     actions.add_argument('--set-password', metavar="USER", help='Query NTLM password for USER and store in keyring')
 
     if platform.system() == 'Windows':
@@ -1849,11 +1853,11 @@ def parse_initial():
     State.config = configparser.ConfigParser()
 
     if args.config:
-        State.ini = args.config
+        State.ini = os.path.expanduser(args.config)
     elif platform.system() == 'Windows':
         State.ini = os.path.join(os.path.dirname(get_script_path()), State.ini)
     else:
-        State.ini = os.path.join(os.path.expanduser('~'), State.ini)
+        State.ini = os.path.join(os.path.expanduser('~/.config'), __progname__, State.ini)
 
 
     # Special-case Gooey's internal option --ignore-gooey: It means we've
@@ -1871,7 +1875,7 @@ def parse_initial():
     # options default to False.
     if '--ignore-gooey' not in remaining_args:
         ini_read = State.config.read(State.ini)
-        if not args.save and args.config and args.config not in ini_read:
+        if not args.save and args.config and State.ini not in ini_read:
             pprint("Unable to parse config file: " + State.ini)
             sys.exit()
 
@@ -1941,10 +1945,10 @@ def parse_config(parser=None):
 
         # Arguments that need to be available both in parse_initial() and in
         # the GUI. For there, we just go with a bit of duplication.
-        parser.add_argument('--config', default=State.ini, widget='FileChooser', gooey_options={'full_width': True}, help='Specify config file. Valid file path, default: px.ini in working directory (user homedir on Linux)')
+        parser.add_argument('--config', default=State.ini, widget='FileChooser', gooey_options={'full_width': True}, help='Specify config file. Valid file path, default: %s in working directory (Windows) or in ~/.config/%s/ (non-Windows)' % (__inidefault__, __progname__))
         parser.add_argument('--save', action='store_true', default=False, help='Save configuration to config file and exit')
 
-    # command-line arguments corresponding to section [proxy] in px.ini
+    # command-line arguments corresponding to section [proxy] in ini file
     options = parser.add_argument_group('proxy options')
     options.add_argument('--proxy', '--server', default=State.config.get('proxy', 'server'), help='NTLM server(s) to connect through. (IP:port, hostname:port)')
     options.add_argument('--pac', default=State.config.get('proxy', 'pac'), help='PAC file to use to connect')
@@ -1958,7 +1962,7 @@ def parse_config(parser=None):
     options.add_argument('--useragent', default=State.config.get('proxy', 'useragent'), help='Override or send User-Agent header on client\'s behalf')
     options.add_argument('--auth', choices=['NTLM', 'BASIC', 'KERBEROS', 'AUTO'], default=State.config.get('proxy', 'auth'), help='Upstream proxy type')
 
-    # command-line arguments corresponding to section [settings] in px.ini
+    # command-line arguments corresponding to section [settings] in ini file
     settings = parser.add_argument_group('settings')
     settings.add_argument('--workers', default=int(State.config.get('settings', 'workers')), type=int, help='Number of parallel workers (processes)')
     settings.add_argument('--threads', default=int(State.config.get('settings', 'threads')), type=int, help='Number of parallel threads per worker (process)')
