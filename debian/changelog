@@ -1,0 +1,56 @@
+px-proxy (0.4.0.linux.6) unofficial; urgency=low
+
+  * px: pass --config argument through tilde expansion for consistency
+  * px: use FHS-compliant location of conffile on Linux
+    (~/.config/px-proxy/px-proxy.ini instead of ~/px.ini)
+  * px: create missing dirs when writing out ini file
+  * px: facilitate renaming of ini file in code-base
+  * px.desktop: integrate with desktop environments
+
+ -- Daniel Kobras (Puzzle ITC) <kobras@puzzle-itc.de>  Mon, 09 Dec 2019 17:33:05 +0100
+
+px-proxy (0.4.0.linux.5) unofficial; urgency=low
+
+  * px: central config for prog and srv names
+  * px: handle arg groups in Gooey compat wrapper
+  * px: add proper GUI widget to password option
+  * px: catch gssapi errors when running w/o krb creds
+  * debian: rename package, executable, and systemd service to px-proxy to
+    avoid clash with official Debian packages of https://github.com/walles/px/
+  * debian: recommend Gooey for GUI support
+
+ -- Daniel Kobras (Puzzle ITC) <kobras@puzzle-itc.de>  Fri, 29 Nov 2019 18:49:54 +0100
+
+px (0.4.0.linux.4) unofficial; urgency=low
+
+  * px: allow to set NTLM pw in GUI and CLI
+  * px: fix start without Gooey in graphical environment
+
+ -- Daniel Kobras (Puzzle ITC) <kobras@puzzle-itc.de>  Tue, 26 Nov 2019 11:40:53 +0100
+
+px (0.4.0.linux.3) unofficial; urgency=low
+
+  * build_pydeps: add helper script to package dependencies
+  * debian: default to native python build
+  * testinfra: add native Debian build
+  * testinfra: consistently use py3
+  * setup.py: add optional GUI requirements
+  * px: support pre-1.2 ntlm_auth versions
+  * px: improve GUI support
+
+ -- Daniel Kobras (Puzzle ITC) <kobras@puzzle-itc.de>  Thu, 21 Nov 2019 13:07:48 +0100
+
+px (0.4.0.linux.2) unofficial; urgency=low
+
+  * px: double number of workers to improve interactivity
+  * px: consistent thread pool size
+  * px: send debug log to homedir on non-Windows
+  * px: restrict startup messages to fatal errors
+
+ -- Daniel Kobras (Puzzle ITC) <kobras@puzzle-itc.de>  Tue, 12 Nov 2019 18:10:16 +0100
+
+px (0.4.0.linux.1) unofficial; urgency=low
+
+  * Initial release
+
+ -- Daniel Kobras (Puzzle ITC) <kobras@puzzle-itc.de>  Mon, 11 Nov 2019 14:03:26 +0100

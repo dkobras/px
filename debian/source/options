@@ -1,0 +1,9 @@
+extend-diff-ignore = "^(build|bin|dist|lib|share|include|__pycache__|.pytest_cache)"
+tar-ignore = build
+tar-ignore = bin
+tar-ignore = dist
+tar-ignore = lib
+tar-ignore = share
+tar-ignore = include
+tar-ignore = __pycache__
+tar-ignore = .pytest_cache

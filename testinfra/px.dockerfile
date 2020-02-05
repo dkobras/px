@@ -114,15 +114,15 @@ FROM ubuntu:bionic as px
 WORKDIR /src
 
 ## Alternative 1: use custom build (and skip the next RUN stanza below)
-COPY --from=px-build-pyinstaller /src/dist/px /usr/bin/px-proxy
+#COPY --from=px-build-pyinstaller /src/dist/px /usr/bin/px-proxy
 ## Alternative 2: use pyinstaller-based Debian package
 #COPY --from=px-build-debian-pyinstaller /src/px-proxy_*_amd64.deb /src
 ## Alternative 3: use full set of Debian packages
-#COPY --from=px-build-debian-native /src/*.deb /src/
-#RUN apt-get update && \
-#    dpkg --install --force-depends /src/*.deb && \
-#    DEBIAN_FRONTEND=noninteractive \
-#    apt-get -y install -f
+COPY --from=px-build-debian-native /src/*.deb /src/
+RUN apt-get update && \
+    dpkg --install --force-depends /src/*.deb && \
+    DEBIAN_FRONTEND=noninteractive \
+    apt-get -y install -f
 
 EXPOSE 3128
 

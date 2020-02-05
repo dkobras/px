@@ -1,0 +1,75 @@
+#!/usr/bin/make -f
+# See debhelper(7) (uncomment to enable)
+# output every command that modifies files on the build system.
+export DH_VERBOSE = 1
+
+ifeq (,$(filter gui,$(DEB_BUILD_OPTIONS)))
+	PX_GUI_MODULE :=
+else
+	PX_GUI_MODULE := gooey
+endif
+
+ifeq (,$(filter pyinstaller,$(DEB_BUILD_OPTIONS)))
+# Native (python) build
+%:
+	dh $@ --with python3 --buildsystem=pybuild
+
+override_dh_python3:
+	# pybuild cannot handle conditional requirements in setup.py by itself,
+	# so we need some force here to include the extra GUI dependencies, and
+	# the Linux-specific requirements (gssapi, pypac). Also, the px-wrapper
+	# installed by setuptools has some dependencies of itself that don't
+	# seem to get picked up by pybuild automatically.
+	dh_python3 --recommends-section=GUI --depends=setuptools --depends=gssapi --depends=pypac
+
+override_dh_auto_install:
+	dh_auto_install
+	mv debian/px-proxy/usr/bin/px debian/px-proxy/usr/bin/px-proxy
+	sed -i 's/^__progname__ = .*/__progname__ = "px-proxy"/' debian/px-proxy/usr/lib/python*/dist-packages/px.py
+	mv debian/px-proxy/usr/share/applications/px.desktop debian/px-proxy/usr/share/applications/px-proxy.desktop
+	sed -i -e 's/^Exec=px$$/&-proxy/' -e 's/^Name=Px$$/&-proxy/' debian/px-proxy/usr/share/applications/px-proxy.desktop
+	install -d -m 0755 debian/px-proxy/etc/systemd/user
+	install -m 0644 px.service debian/px-proxy/etc/systemd/user/px-proxy.service
+	sed -i 's,/usr/bin/px,/usr/bin/px-proxy,g' debian/px-proxy/etc/systemd/user/px-proxy.service
+
+else
+# PyInstaller build
+%:
+	dh $@
+
+override_dh_auto_install:
+	install -d -m 0755 debian/px-proxy/usr/bin
+	install -m 0755 dist/px debian/px-proxy/usr/bin/px-proxy
+	install -d -m 0755 debian/px-proxy/etc/systemd/user
+	sed -e 's,/usr/bin/px,/usr/bin/px-proxy,g' < px.service > debian/px-proxy/etc/systemd/user/px-proxy.service
+	sed -e 's/^Exec=px$$/&-proxy/' -e 's/^Name=Px$$/&-proxy/' < px.desktop > debian/px-proxy/usr/share/applications/px-proxy.desktop
+
+override_dh_auto_build:
+	# Evil! Some required Python modules are either not available as Debian
+	# package, or they are too old. Grab them via pip instead, and use
+	# pyinstaller to bake them into a standalone binary.
+	virtualenv -p python3 .
+	. bin/activate && \
+	pip3 install --no-cache-dir $(PX_GUI_MODULE) gssapi ntlm-auth netaddr keyring keyrings.alt psutil pyinstaller pypac && \
+	sed -i 's/^__progname__ = .*/__progname__ = "px-proxy"/' px.py && \
+	./build.sh
+
+override_dh_auto_clean:
+	rm -rf dist local __pycache__ testinfra/__pycache__ px.spec
+
+override_dh_auto_configure:
+	@echo "Nothing to configure"
+
+override_dh_dwz:
+	# dwz errors out on pyinstaller-built binary. Disable for now until we
+	# figure out what's going on.
+endif
+
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+override_dh_auto_test:
+	(cd testinfra && docker-compose up -d)
+	sleep 60 # Docker services need some time to fully initialize
+	testinfra/tests.py -v
+	(cd testinfra && docker-compose down)
+endif
+
