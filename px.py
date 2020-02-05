@@ -1957,6 +1957,49 @@ def parse_config(parser=None):
     options.add_argument('--gateway', action='store_true', default=bool(int(State.config.get('proxy', 'gateway'))), help='Allow remote machines to use proxy')
     options.add_argument('--hostonly', action='store_true', default=bool(int(State.config.get('proxy', 'hostonly'))), help='Allow only local interfaces to use proxy')
     options.add_argument('--username', default=State.config.get('proxy', 'username'), help='Authentication to use when SSPI/GSSAPI is unavailable (matching password is retrieved from keyring)')
+    if gui:
+        # XXX Horrible hack that exploits Gooey implementation details to
+        #     provide a convenient password field for GUI users.
+        #     To this end, we add a pseudo-option --password that makes
+        #     Gooey display the respective widget in the GUI. However, we
+        #     do not actually want to pass cleartext password information
+        #     via command-line options for obvious security reasons.
+        #     Therefore, we grab the password once it's set in the GUI,
+        #     re-direct it to the proper place (the default keyring), and
+        #     then clear it in the GUI itself before Gooey constructs its
+        #     command-line.
+        #     Alas, by design, Gooey can run in a context that's completely
+        #     separate from our application (with only some JSON config to
+        #     interact), so we cannot simply define a new widget class for
+        #     our purposes. Instead, Gooey's validator functionality provides
+        #     the only means to inject some code of our own into Gooey, but
+        #     it's fairly limited: We can pass a string that must evaluate
+        #     to a valid Python expression with <user_input> as its only
+        #     available variable (corresponding to the password as set by
+        #     the user). For valid input, the expression must evaluate to
+        #     'True'.
+        #     Because we're limited to expressions, and cannot use Python
+        #     statements, we pull a few tricks like using '__import__()'
+        #     instead of 'import', updating the locals() dict instead of
+        #     assignments, and using 'and'/'or' as (short-circuit)
+        #     conditionals. Even worse, we examine our callstack with
+        #     'inspect' to clear the password field in our own widget,
+        #     and to read out the value of the 'username' widget. This is
+        #     extremely brittle, of course, and is likely to break when
+        #     Gooey adjusts its internal callstack.
+        options.add_argument('--password', default='', widget='PasswordField',
+                             help='NTLM password to use when SSPI/GSSAPI is unavailable',
+                             gooey_options={'validator': {'test':
+                                                          'not user_input or \
+                                                           locals().update({"callstack": dict((x.function, x.frame) for x in __import__("inspect").getouterframes(__import__("inspect").currentframe()))}) or \
+                                                           locals().update({"pwwidget": locals()["callstack"]["getValue"].f_locals["self"], \
+                                                                            "config": locals()["callstack"]["isValid"].f_locals["self"]}) or \
+                                                           locals().update({"user_name": locals()["config"].widgetsMap["--username"].getWidgetValue()}) or \
+                                                          (locals()["user_name"] and \
+                                                           any((locals()["pwwidget"].setValue(""), \
+                                                               __import__("keyring").set_password("Px", locals()["user_name"], user_input), \
+                                                               True)))',
+                                                          'message': 'Username must be set if password is given'}})
     options.add_argument('--allow', default=State.config.get('proxy', 'allow'), help='Allow connection from specific subnets (comma-separated list)')
     options.add_argument('--noproxy', default=State.config.get('proxy', 'noproxy'), help='Direct connect to specific subnets like a regular proxy (comma-separated list)')
     options.add_argument('--useragent', default=State.config.get('proxy', 'useragent'), help='Override or send User-Agent header on client\'s behalf')
